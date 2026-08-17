@@ -7,8 +7,9 @@ from langchain_openai import ChatOpenAI
 from tools import search_flights, search_hotels, search_attractions
 from langgraph.graph import StateGraph, START, END
 from dotenv import load_dotenv
-
 import time
+import sqlite3
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 load_dotenv()
 # ── Pydantic-моделі для структурованого виводу ──────────────────
@@ -52,6 +53,9 @@ replanner_llm = llm.with_structured_output(ReplanDecision)
 tools = [search_flights, search_hotels, search_attractions]
 tools_by_name = {t.name: t for t in tools}
 llm_with_tools = llm.bind_tools(tools)
+
+conn = sqlite3.connect('agent_state.db', check_same_thread=False)
+saver = SqliteSaver(conn)
 
 # ── Вузли ───────────────────────────────────────────────────────
 
@@ -166,7 +170,8 @@ graph.add_edge('planner', 'executor')
 graph.add_edge('executor', 'replanner')
 graph.add_conditional_edges('replanner', should_end)
 
-app = graph.compile()
+# Компілюємо граф з checkpointer
+app_with_memory = graph.compile(checkpointer=saver)
 
 # ── Запуск ──────────────────────────────────────────────────────
 
@@ -208,7 +213,10 @@ if __name__ == "__main__":
             'completed': False
         }
 
-        for event in app.stream(initial_state, stream_mode="updates"):
+        config = {'configurable': {
+            'thread_id': f'session-tc-{test_cases.index(tc)}'}}
+
+        for event in app_with_memory.stream(initial_state, config=config, stream_mode="updates"):
             for node_name, node_state in event.items():
 
                 if isinstance(node_state, dict):
@@ -226,3 +234,55 @@ if __name__ == "__main__":
 
         print(f"--- {tc['name']} завершено ---\n")
         time.sleep(1)  # Пауза між тестами, щоб не перевантажити API
+
+    # ТЕСТ 4: Переривання та відновлення стану
+    print("\n" + "="*70)
+    print("ТЕСТ 4: Переривання та відновлення стану")
+    print("="*70 + "\n")
+
+    config_persist = {'configurable': {'thread_id': 'session-interrupted-004'}}
+    query_persist = "Сплануй поїздку з Києва до Варшави на 25 жовтня 2026. Знайди квитки, а потім готель."
+
+    initial_state_persist = {
+        'messages': [HumanMessage(content=query_persist)],
+        'plan': [],
+        'current_step': 0,
+        'results': [],
+        'completed': False
+    }
+
+    event_count = 0
+
+    for event in app_with_memory.stream(initial_state_persist, config=config_persist, stream_mode="updates"):
+        for node_name, node_state in event.items():
+            if isinstance(node_state, dict) and 'messages' in node_state and node_state['messages']:
+                last_msg = node_state['messages'][-1].content
+                print(
+                    f"[{node_name.upper()}] {last_msg if last_msg else 'Дія виконана'}\n")
+
+        event_count += 1
+
+        # симуляція збою, вихід з циклу
+        if event_count >= 2:
+            print("виконання перервано!\n")
+            break
+
+    print("Перезапуск програми... Відновлення стану з SqliteSaver...\n")
+
+    restored_state = app_with_memory.get_state(config_persist)
+    print(
+        f"Відновлений поточний крок: {restored_state.values.get('current_step')}")
+    print(
+        f"Зібрані результати до збою: {restored_state.values.get('results')}\n")
+
+    print("Продовження виконання з місця зупинки...\n")
+
+    # передаємо None замість initial_state
+    for event in app_with_memory.stream(None, config=config_persist, stream_mode="updates"):
+        for node_name, node_state in event.items():
+            if isinstance(node_state, dict) and 'messages' in node_state and node_state['messages']:
+                last_msg = node_state['messages'][-1].content
+                print(
+                    f"[{node_name.upper()}] {last_msg if last_msg else 'Дія виконана'}\n")
+
+    print("--- ТЕСТ 4 завершено ---\n")
