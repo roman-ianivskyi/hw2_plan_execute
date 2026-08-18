@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
 from tools import search_flights, search_hotels, search_attractions
+from knowledge import search_knowledge
 from langgraph.graph import StateGraph, START, END
 from dotenv import load_dotenv
 import time
@@ -50,7 +51,7 @@ llm = ChatOpenAI(model="google/gemini-3.7-flash",
 planner_llm = llm.with_structured_output(Plan)
 replanner_llm = llm.with_structured_output(ReplanDecision)
 
-tools = [search_flights, search_hotels, search_attractions]
+tools = [search_flights, search_hotels, search_attractions, search_knowledge]
 tools_by_name = {t.name: t for t in tools}
 llm_with_tools = llm.bind_tools(tools)
 
@@ -185,7 +186,8 @@ if __name__ == "__main__":
             "name": "ТЕСТ 2: Складний послідовний план (Без перепланування)",
             "query": (
                 "Сплануй мою поїздку з Торонто до Ванкувера на 10 жовтня 2026 року для 2 осіб. "
-                "Спершу перевір авіаквитки, потім підбери готель на 14 ночей, і наостанок — знайди природні локації."
+                "Спершу перевір авіаквитки, потім підбери готель на 14 ночей,"
+                " і наостанок — знайди природні локації та надай інформацію про місто."
             )
         },
         {
@@ -196,6 +198,10 @@ if __name__ == "__main__":
                 "УВАГА: Якщо авіаквитків до Монреаля немає, повністю зміни план: "
                 "замість Монреаля знайди квитки з Торонто до Ванкувера та підбери готель у Ванкувері."
             )
+        },
+        {
+            "name": "ТЕСТ 4: Тільки довідкова інформація (RAG)",
+            "query": "Які візові правила для поїздки до Коста-Рики з Канади? І що варто брати з собою?"
         }
     ]
 
@@ -235,12 +241,12 @@ if __name__ == "__main__":
         print(f"--- {tc['name']} завершено ---\n")
         time.sleep(1)  # Пауза між тестами, щоб не перевантажити API
 
-    # ТЕСТ 4: Переривання та відновлення стану
+    # ТЕСТ 5: Переривання та відновлення стану
     print("\n" + "="*70)
-    print("ТЕСТ 4: Переривання та відновлення стану")
+    print("ТЕСТ 5: Переривання та відновлення стану")
     print("="*70 + "\n")
 
-    config_persist = {'configurable': {'thread_id': 'session-interrupted-004'}}
+    config_persist = {'configurable': {'thread_id': 'session-interrupted-005'}}
     query_persist = "Сплануй поїздку з Києва до Варшави на 25 жовтня 2026. Знайди квитки, а потім готель."
 
     initial_state_persist = {
@@ -285,4 +291,4 @@ if __name__ == "__main__":
                 print(
                     f"[{node_name.upper()}] {last_msg if last_msg else 'Дія виконана'}\n")
 
-    print("--- ТЕСТ 4 завершено ---\n")
+    print("--- ТЕСТ 5 завершено ---\n")
