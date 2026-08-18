@@ -141,7 +141,19 @@ def search_attractions(attraction: AttractionSearchInput) -> str:
     return f"{attraction.category.capitalize()} у {city_caps} (оновлено: {attraction.updated}): {db[city_caps].get(attraction.category, 'Немає даних')}"
 
 
+@tool
+def book_flight(flight_number: str, passengers: int, price: str) -> str:
+    """Забронювати авіаквитки (ризикована дія — потребує підтвердження).
+
+    Використовуйте цей інструмент лише тоді, коли користувач прямо
+    попросив забронювати, купити або оплатити квитки.
+    """
+    print(
+        f"Бронювання рейсу {flight_number} для {passengers} пасажирів. Списано: {price}")
+    return f"УСПІХ: Заброньовано рейс {flight_number} для {passengers} пасажирів. Списано: {price}"
+
 # тести
+
 
 if __name__ == "__main__":
     print("--- Тестування пошуку авіаквитків ---")

@@ -4,13 +4,14 @@ from pydantic import BaseModel, Field
 
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
-from tools import search_flights, search_hotels, search_attractions
+from tools import search_flights, search_hotels, search_attractions, book_flight
 from knowledge import search_knowledge
 from langgraph.graph import StateGraph, START, END
 from dotenv import load_dotenv
 import time
 import sqlite3
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.types import interrupt, Command
 
 load_dotenv()
 # ── Pydantic-моделі для структурованого виводу ──────────────────
@@ -51,7 +52,11 @@ llm = ChatOpenAI(model="google/gemini-3.7-flash",
 planner_llm = llm.with_structured_output(Plan)
 replanner_llm = llm.with_structured_output(ReplanDecision)
 
-tools = [search_flights, search_hotels, search_attractions, search_knowledge]
+tools = [search_flights, search_hotels,
+         search_attractions, search_knowledge, book_flight]
+
+RISKY_TOOLS = {'book_flight'}
+
 tools_by_name = {t.name: t for t in tools}
 llm_with_tools = llm.bind_tools(tools)
 
@@ -106,13 +111,38 @@ def executor_node(state: PlanExecuteState) -> dict:
     # Якщо LLM викликав tool — виконати
     if hasattr(response, 'tool_calls') and response.tool_calls:
         for tc in response.tool_calls:
-            tool_fn = tools_by_name.get(tc['name'])
-            if tool_fn:
-                try:
+            if tc['name'] in RISKY_TOOLS:
+                print(
+                    f"\nАгент намагається виконати ризикову дію: {tc['name']}")
+
+                # ── INTERRUPT: зупинити для підтвердження ────────
+                approval = interrupt({
+                    'action': tc['name'],
+                    'args': tc['args'],
+                    'message': (
+                        f'Підтвердіть ризикову дію:\n'
+                        f'Tool: {tc["name"]}\n'
+                        f'Параметри: {tc["args"]}'
+                    )
+                })
+
+                if isinstance(approval, dict) and approval.get('approved'):
+                    tool_fn = tools_by_name.get(tc['name'])
                     tool_result = tool_fn.invoke(tc['args'])
-                    result = f'Дані від {tc["name"]}: {tool_result}'
-                except Exception as e:
-                    result = f'Помилка виконання {tc["name"]}: {e}'
+                    result = f'Підтверджено. Дані від {tc["name"]}: {tool_result}'
+                else:
+                    reason = approval.get("reason", "Відхилено оператором") if isinstance(
+                        approval, dict) else "Відхилено"
+                    result = f'Скасовано: {reason}'
+
+            else:
+                tool_fn = tools_by_name.get(tc['name'])
+                if tool_fn:
+                    try:
+                        tool_result = tool_fn.invoke(tc['args'])
+                        result = f'Дані від {tc["name"]}: {tool_result}'
+                    except Exception as e:
+                        result = f'Помилка виконання {tc["name"]}: {e}'
 
     return {
         'current_step': step_idx + 1,
@@ -129,10 +159,7 @@ def replanner_node(state: PlanExecuteState) -> dict:
 
     user_msg = state['messages'][0].content if state['messages'] else ''
 
-    if step_idx >= len(plan):
-        return {'completed': True, 'messages': [AIMessage(content="Всі кроки виконано.")]}
-
-    remaining = plan[step_idx:]
+    remaining = plan[step_idx:] if step_idx < len(plan) else []
     prompt = (
         f'оригінальний запит користувача: {user_msg}\n'
         f'Оціни прогрес виконання:\n'
@@ -292,3 +319,83 @@ if __name__ == "__main__":
                     f"[{node_name.upper()}] {last_msg if last_msg else 'Дія виконана'}\n")
 
     print("--- ТЕСТ 5 завершено ---\n")
+
+    # ======================================================================
+    # ТЕСТ 6: hitl
+    # ======================================================================
+    print("\n" + "="*70)
+    print("ТЕСТ: Human-in-the-Loop (Бронювання квитків)")
+    print("="*70 + "\n")
+
+    config_hitl = {'configurable': {'thread_id': 'hitl-booking-session-001'}}
+    query_hitl = (
+        "Сплануй поїздку з Торонто до Ванкувера для 2 людей на 10 жовтня 2026. "
+        "Спершу перевір квитки, а тоді забронюй їх."
+    )
+
+    initial_state_hitl = {
+        'messages': [HumanMessage(content=query_hitl)],
+        'plan': [],
+        'current_step': 0,
+        'results': [],
+        'completed': False
+    }
+
+    for event in app_with_memory.stream(initial_state_hitl, config=config_hitl, stream_mode="updates"):
+        for node_name, node_state in event.items():
+            if isinstance(node_state, dict) and 'messages' in node_state and node_state['messages']:
+                last_msg = node_state['messages'][-1].content
+                print(
+                    f"[{node_name.upper()}] {last_msg if last_msg else 'Дія виконана'}\n")
+
+    state = app_with_memory.get_state(config_hitl)
+
+    if state.next:
+        print("граф зупинено. очікування дії людини (hitl)")
+
+        interrupt_data = state.tasks[0].interrupts[0].value
+        print(f"Повідомлення від агента: {interrupt_data['message']}")
+
+        time.sleep(1)
+
+        # user_decision = Command(resume={'approved': True})
+
+        user_reject = Command(resume={
+            'approved': False,
+            'reason': 'Я передумав, забронюй квиток лише для 1 пасажира.'
+        })
+        print(
+            "людина відхилила ризикову дію. Продовження виконання з новими параметрами...\n")
+
+        for event in app_with_memory.stream(user_reject, config=config_hitl, stream_mode="updates"):
+            for node_name, node_state in event.items():
+                if isinstance(node_state, dict) and 'messages' in node_state and node_state['messages']:
+                    last_msg = node_state['messages'][-1].content
+                    print(
+                        f"[{node_name.upper()}] {last_msg if last_msg else 'Дія виконана'}\n")
+
+                if node_name == 'replanner' and 'plan' in node_state and node_state.get('current_step') == 0:
+                    for i, step in enumerate(node_state['plan'], 1):
+                        print(f"      {i}. {step}")
+                    print("\n")
+
+    state = app_with_memory.get_state(config_hitl)
+
+    if state.next:
+        print("граф зупинено. очікування дії людини (hitl)")
+        interrupt_data = state.tasks[0].interrupts[0].value
+        print(f"Повідомлення від агента: {interrupt_data['message']}")
+
+        time.sleep(1)
+
+        user_approve = Command(resume={'approved': True})
+        print("людина підтвердила ризикову дію. Продовження виконання...\n")
+
+        for event in app_with_memory.stream(user_approve, config=config_hitl, stream_mode="updates"):
+            for node_name, node_state in event.items():
+                if isinstance(node_state, dict) and 'messages' in node_state and node_state['messages']:
+                    last_msg = node_state['messages'][-1].content
+                    print(
+                        f"[{node_name.upper()}] {last_msg if last_msg else 'Дія виконана'}\n")
+
+    print("\n--- ТЕСТ 6 завершено ---")
